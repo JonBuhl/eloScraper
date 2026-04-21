@@ -1,0 +1,16 @@
+{
+  "name": "moodle-scraper",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "start": "node scraper.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "playwright": "^1.59.1"
+  },
+  "type": "module"
+}
