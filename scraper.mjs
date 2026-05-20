@@ -299,6 +299,7 @@ async function downloadFiles(context, page, courseData) {
 
             log("⬇️ ", `[resource→http] ${section.name}/${finalName}`);
             await downloadViaCookies(cookieHeader, resolved.directUrl, finalPath);
+            log("  ✅", finalName);
             total++;
           } else {
             // Fallback: kein direkter pluginfile.php-Redirect → Browser-Tab
@@ -340,6 +341,7 @@ async function downloadFiles(context, page, courseData) {
         log("⬇️ ", `[direct] ${section.name}/${fileName}`);
         try {
           await downloadViaCookies(cookieHeader, file.href, destPath);
+          log("  ✅", fileName);
           total++;
         } catch (e) {
           log("❌", `"${fileName}": ${e.message}`);
