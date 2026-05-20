@@ -126,7 +126,7 @@ async function scrapeCourse(page, courseId) {
       seenHrefs.add(href);
       let label = sanitize(await link.innerText().catch(() => "")) ||
         decodeURIComponent(href.split("/").pop().replace(/\?.*$/, ""));
-      
+
       for (const ext of ALLOWED_EXTENSIONS) {
         if (label.toLowerCase().endsWith(ext)) {
           label = label.slice(0, -ext.length);
@@ -196,10 +196,7 @@ async function downloadViaPlaywright(context, url, destDir, preferredName) {
 
 // ─── Download via HTTP + Cookies (pluginfile.php) ────────────────────────────
 
-async function downloadViaCookies(context, url, destPath) {
-  const cookies = await context.cookies();
-  const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
-
+async function downloadViaCookies(cookieHeader, url, destPath) {
   return new Promise((resolve, reject) => {
     function doGet(targetUrl) {
       const parsed = new URL(targetUrl);
@@ -212,10 +209,10 @@ async function downloadViaCookies(context, url, destPath) {
         },
         (res) => {
           if (res.statusCode === 301 || res.statusCode === 302) {
-            return doGet(res.headers.location);
+            return doGet(new URL(res.headers.location, targetUrl).toString());
           }
           if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
-          
+
           const stream = createWriteStream(destPath);
           res.pipe(stream);
           stream.on("finish", resolve);
@@ -227,11 +224,50 @@ async function downloadViaCookies(context, url, destPath) {
   });
 }
 
+// ─── Resource auflösen: Filename + direkte URL via HTTP-Redirect ─────────────
+// Moodle leitet mod/resource/view.php in der Regel auf pluginfile.php weiter.
+// So sparen wir uns einen Browser-Tab nur um den Dateinamen zu erfahren.
+
+async function resolveResource(cookieHeader, url) {
+  return new Promise((resolve) => {
+    function doGet(targetUrl, depth = 0) {
+      if (depth > 4) return resolve(null);
+      const parsed = new URL(targetUrl);
+      const lib = parsed.protocol === "https:" ? https : http;
+      lib.get(
+        {
+          hostname: parsed.hostname,
+          path: parsed.pathname + parsed.search,
+          headers: { Cookie: cookieHeader },
+        },
+        (res) => {
+          res.resume(); // body verwerfen
+          const code = res.statusCode;
+          if (code >= 300 && code < 400 && res.headers.location) {
+            const loc = new URL(res.headers.location, targetUrl).toString();
+            if (loc.includes("pluginfile.php")) {
+              const name = decodeURIComponent(loc.split("/").pop().split("?")[0]);
+              return resolve({ filename: name, directUrl: loc });
+            }
+            return doGet(loc, depth + 1);
+          }
+          resolve(null);
+        }
+      ).on("error", () => resolve(null));
+    }
+    doGet(url);
+  });
+}
+
 // ─── Dateien herunterladen ───────────────────────────────────────────────────────
 
 async function downloadFiles(context, page, courseData) {
   const courseDir = join(OUTPUT_DIR, courseData.course);
   mkdirSync(courseDir, { recursive: true });
+
+  // Cookie-Header einmal pro Kurs aufbauen (statt pro Datei)
+  const cookies = await context.cookies();
+  const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
 
   let total = 0, skipped = 0, failed = 0;
 
@@ -241,15 +277,39 @@ async function downloadFiles(context, page, courseData) {
 
     for (const file of section.files) {
       if (file.indirect) {
-        // mod/resource: Browser-Download abfangen, Moodle wählt den Dateinamen
-        log("⬇️ ", `[resource] ${section.name}/${file.label}`);
+        // mod/resource → erst per HTTP-Redirect Filename ermitteln
         try {
-          const result = await downloadViaPlaywright(context, file.href, sectionDir, file.label);
-          if (result.skipped) {
-            skipped++;
-          } else {
-            log("  ✅", result.name);
+          const resolved = await resolveResource(cookieHeader, file.href);
+
+          if (resolved) {
+            const finalName = sanitize(resolved.filename);
+            const finalPath = join(sectionDir, finalName);
+            const ext = extname(finalName).toLowerCase();
+
+            if (existsSync(finalPath)) {
+              log("⏭ ", `Übersprungen (vorhanden): ${section.name}/${finalName}`);
+              skipped++;
+              continue;
+            }
+            if (ext && !ALLOWED_EXTENSIONS.includes(ext)) {
+              log("⏭ ", `Nicht erlaubt: ${section.name}/${finalName} (${ext})`);
+              skipped++;
+              continue;
+            }
+
+            log("⬇️ ", `[resource→http] ${section.name}/${finalName}`);
+            await downloadViaCookies(cookieHeader, resolved.directUrl, finalPath);
             total++;
+          } else {
+            // Fallback: kein direkter pluginfile.php-Redirect → Browser-Tab
+            log("⬇️ ", `[resource] ${section.name}/${file.label}`);
+            const result = await downloadViaPlaywright(context, file.href, sectionDir, file.label);
+            if (result.skipped) {
+              skipped++;
+            } else {
+              log("  ✅", result.name);
+              total++;
+            }
           }
         } catch (e) {
           log("❌", `"${file.label}": ${e.message}`);
@@ -268,7 +328,7 @@ async function downloadFiles(context, page, courseData) {
             fileName += ".pdf"; // Fallback
           }
         }
-        
+
         const destPath = join(sectionDir, fileName);
 
         if (existsSync(destPath)) {
@@ -279,7 +339,7 @@ async function downloadFiles(context, page, courseData) {
 
         log("⬇️ ", `[direct] ${section.name}/${fileName}`);
         try {
-          await downloadViaCookies(context, file.href, destPath);
+          await downloadViaCookies(cookieHeader, file.href, destPath);
           total++;
         } catch (e) {
           log("❌", `"${fileName}": ${e.message}`);
